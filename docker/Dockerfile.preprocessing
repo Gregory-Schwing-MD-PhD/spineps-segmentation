@@ -1,0 +1,29 @@
+FROM python:3.10-slim
+
+# Install system dependencies for DICOM processing
+RUN apt-get update && apt-get install -y \
+    dcm2niix \
+    curl \
+    wget \
+    git \
+    unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python packages
+RUN pip install --no-cache-dir \
+    kaggle \
+    pandas \
+    numpy \
+    pydicom \
+    nibabel \
+    tqdm \
+    natsort
+
+# Set up Kaggle directory
+RUN mkdir -p /root/.kaggle
+
+# Set working directory
+WORKDIR /work
+
+# Default command
+CMD ["/bin/bash"]

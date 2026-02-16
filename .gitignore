@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Data
+data/raw/
+data/output/
+results/
+*.nii
+*.nii.gz
+*.dcm
+*.zip
+
+# Models
+models/spineps_cache/
+*.pth
+*.pt
+
+# Logs
+logs/
+*.out
+*.err
+
+# Singularity
+*.sif
+singularity_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Keep structure files
+!data/raw/.gitkeep
+!data/output/.gitkeep
+!results/.gitkeep
+!models/.gitkeep
+!logs/.gitkeep
+
+# Keep validation IDs
+!models/valid_id.npy

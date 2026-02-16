@@ -1,0 +1,32 @@
+FROM python:3.10-slim
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    dcm2niix \
+    git \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install SPINEPS and dependencies
+RUN pip install --no-cache-dir \
+    spineps \
+    nibabel \
+    numpy \
+    pandas \
+    scipy \
+    tqdm \
+    natsort \
+    pydicom
+
+# Create directories for models and work
+RUN mkdir -p /app/models /work
+
+# Set environment variables for SPINEPS
+ENV SPINEPS_SEGMENTOR_MODELS=/app/models
+ENV SPINEPS_ENVIRONMENT_DIR=/app/models
+
+# Set working directory
+WORKDIR /work
+
+# Default command
+CMD ["/bin/bash"]
