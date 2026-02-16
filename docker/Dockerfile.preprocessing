@@ -1,29 +1,48 @@
-FROM python:3.10-slim
+FROM python:3.11-slim
 
-# Install system dependencies for DICOM processing
-RUN apt-get update && apt-get install -y \
-    dcm2niix \
-    curl \
+LABEL maintainer="go2432@wayne.edu"
+LABEL description="Preprocessing container for DICOM/NIfTI handling"
+LABEL version="1.0"
+
+WORKDIR /workspace
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     git \
-    unzip \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    dcmtk \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python packages
+RUN pip install --upgrade pip setuptools wheel
+
 RUN pip install --no-cache-dir \
-    kaggle \
-    pandas \
-    numpy \
-    pydicom \
-    nibabel \
-    tqdm \
-    natsort
+    nibabel==5.1.0 \
+    SimpleITK==2.3.1 \
+    pydicom==2.4.4 \
+    dicom2nifti==2.4.10 \
+    dicom-numpy==0.6.3
 
-# Set up Kaggle directory
-RUN mkdir -p /root/.kaggle
+RUN pip install --no-cache-dir \
+    numpy==1.24.3 \
+    pandas==2.1.4 \
+    scipy==1.11.4 \
+    h5py==3.10.0 \
+    pillow==10.1.0
 
-# Set working directory
-WORKDIR /work
+RUN pip install --no-cache-dir \
+    opencv-python-headless==4.8.1.78 \
+    scikit-image==0.22.0
 
-# Default command
+RUN pip install --no-cache-dir \
+    tqdm==4.66.1 \
+    pyyaml==6.0.1 \
+    kaggle==1.8.4
+
+RUN mkdir -p /data /results
+
+ENV PYTHONUNBUFFERED=1
+
 CMD ["/bin/bash"]

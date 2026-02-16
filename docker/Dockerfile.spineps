@@ -1,32 +1,59 @@
-FROM python:3.10-slim
+# ================================================================
+# SINGLE STAGE: Simple, Robust, Fast
+# ================================================================
+FROM pytorch/pytorch:2.3.1-cuda12.1-cudnn8-runtime
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    dcm2niix \
+LABEL maintainer="go2432@wayne.edu"
+LABEL description="SPINEPS LSTV screening container - Final Fix"
+LABEL version="1.5-single-stage"
+
+WORKDIR /app
+
+# 1. 🛑 SAFETY NET: Prevent PyTorch Bloat
+# We explicitly tell pip: "If spineps asks for torch, use the one you already have."
+RUN echo "numpy<2.0" > /tmp/constraints.txt && \
+    echo "torch==2.3.1" >> /tmp/constraints.txt && \
+    echo "torchvision==0.18.1" >> /tmp/constraints.txt
+ENV PIP_CONSTRAINT=/tmp/constraints.txt
+
+# 2. Install System Dependencies (All in one go to save layers)
+# git: to clone your repo
+# libgl1/libglib2: for OpenCV/graphics
+# dcm2niix: for DICOM conversion
+RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
-    wget \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    dcm2niix \
     && rm -rf /var/lib/apt/lists/*
 
-# Install SPINEPS and dependencies
-RUN pip install --no-cache-dir \
-    spineps \
-    nibabel \
-    numpy \
-    pandas \
-    scipy \
-    tqdm \
-    natsort \
-    pydicom
+# 3. Clone Your Repo (Newest Commit)
+RUN git clone https://github.com/Gregory-Schwing-MD-PhD/spineps.git /app/spineps_source && \
+    cd /app/spineps_source && \
+    git checkout e78975c35544acf10c077e685cd4558c6884cd0e
 
-# Create directories for models and work
-RUN mkdir -p /app/models /work
+# 4. 🔧 PATCH: Remove 'pathlib' dependency
+# This fixes the "ImportError: cannot import name 'Sequence'" crash.
+# Modern Python (3.10) has pathlib built-in. The pypi version is broken.
+RUN sed -i '/pathlib/d' /app/spineps_source/pyproject.toml
 
-# Set environment variables for SPINEPS
-ENV SPINEPS_SEGMENTOR_MODELS=/app/models
-ENV SPINEPS_ENVIRONMENT_DIR=/app/models
+# 5. Install SPINEPS (Global Install)
+# No --user flag. This installs spineps directly into /opt/conda
+WORKDIR /app/spineps_source
+RUN pip install --no-cache-dir .
 
-# Set working directory
-WORKDIR /work
+# 6. Cleanup (Optional: remove source code to save a tiny bit of space)
+WORKDIR /app
+RUN rm -rf /app/spineps_source
 
-# Default command
+# 7. Setup Environment Variables
+# We don't need PYTHONPATH anymore because we installed globally!
+ENV SPINEPS_SEGMENTOR_MODELS=/app/models \
+    SPINEPS_ENVIRONMENT_DIR=/app/models \
+    PYTHONUNBUFFERED=1 \
+    PYTHONWARNINGS="ignore"
+
+# Create standard directories
+RUN mkdir -p /app/models /app/data /app/output
+
 CMD ["/bin/bash"]
