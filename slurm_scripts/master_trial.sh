@@ -16,6 +16,14 @@ echo "MASTER: TRIAL PIPELINE (3 Studies)"
 echo "Job ID: $SLURM_JOB_ID"
 echo "================================================================"
 
+# --- STRICT ENVIRONMENT SETUP ---
+export CONDA_PREFIX="${HOME}/mambaforge/envs/nextflow"
+export PATH="${CONDA_PREFIX}/bin:$PATH"
+unset JAVA_HOME
+
+which singularity || echo "WARNING: singularity not found"
+# --------------------------------
+
 PROJECT_DIR="$(pwd)"
 DATA_CHECK="${PROJECT_DIR}/data/raw/train_series_descriptions.csv"
 
@@ -37,6 +45,7 @@ fi
 
 # 2. SUBMIT SEGMENTATION (Trial Mode)
 echo "[*] Submitting Segmentation Job..."
+# Note: sbatch returns the job ID, we use it to track dependencies if needed
 JOB_ID_SEG=$(sbatch --parsable $DEPENDENCY --export=MODE=trial "$SEG_SCRIPT")
 echo "    -> Segmentation Job: $JOB_ID_SEG"
 
