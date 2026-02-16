@@ -50,7 +50,7 @@ if [[ ! -f "$KAGGLE_JSON" ]]; then
 fi
 echo "Kaggle credentials found: $KAGGLE_JSON"
 
-# --- CONTAINER SETUP (User requested spineps-preprocessing) ---
+# --- CONTAINER SETUP ---
 CONTAINER="docker://go2432/spineps-preprocessing:latest"
 IMG_PATH="${NXF_SINGULARITY_CACHEDIR}/spineps-preprocessing.sif"
 
@@ -80,8 +80,22 @@ singularity exec \
         unzip -j -o rsna2024-demo-workflow.zip valid_id.npy
         mv valid_id.npy /work/models/
         
+        echo 'Downloading CSV...'
         kaggle competitions download -c rsna-2024-lumbar-spine-degenerative-classification -f train_series_descriptions.csv
-        unzip -o train_series_descriptions.csv.zip
+        
+        # --- FIX: Check if file is zipped or not ---
+        if [ -f 'train_series_descriptions.csv.zip' ]; then
+            echo 'Unzipping CSV...'
+            unzip -o train_series_descriptions.csv.zip
+        elif [ -f 'train_series_descriptions.csv' ]; then
+            echo 'CSV downloaded uncompressed (skipping unzip).'
+        else
+            echo 'ERROR: CSV file not found after download.'
+            ls -lh
+            exit 1
+        fi
+        # -------------------------------------------
+
         mv train_series_descriptions.csv /work/data/raw/
         
         echo '--- 2. Downloading & Extracting Images ---'
