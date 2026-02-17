@@ -13,14 +13,17 @@
 
 set -euo pipefail
 
+# Mode is passed via --export=MODE=... or defaults to prod
 MODE=${MODE:-prod}
 
 echo "================================================================"
-echo "WORKER: SPINEPS SEGMENTATION"
+echo "SPINEPS SEGMENTATION"
 echo "Mode: $MODE"
 echo "Job ID: $SLURM_JOB_ID | GPU: $CUDA_VISIBLE_DEVICES"
+echo "Start: $(date)"
 echo "================================================================"
 
+# --- Environment ---
 export CONDA_PREFIX="${HOME}/mambaforge/envs/nextflow"
 export PATH="${CONDA_PREFIX}/bin:$PATH"
 unset JAVA_HOME
@@ -31,29 +34,24 @@ mkdir -p $XDG_RUNTIME_DIR $NXF_SINGULARITY_CACHEDIR
 export NXF_SINGULARITY_HOME_MOUNT=true
 unset LD_LIBRARY_PATH PYTHONPATH R_LIBS R_LIBS_USER R_LIBS_SITE
 
-# ============================================================================
-# PATHS
-# ============================================================================
-
+# --- Paths ---
 PROJECT_DIR="$(pwd)"
 DATA_DIR="${PROJECT_DIR}/data/raw/train_images"
 SERIES_CSV="${PROJECT_DIR}/data/raw/train_series_descriptions.csv"
 OUTPUT_DIR="${PROJECT_DIR}/results/spineps_segmentation"
 NIFTI_DIR="${OUTPUT_DIR}/nifti"
-MODELS_CACHE="${PROJECT_DIR}/models/spineps_cache"
+MODELS_CACHE="${PROJECT_DIR}/models/spineps_cache"   # SPINEPS downloads weights here
 
 mkdir -p logs "$OUTPUT_DIR" "$NIFTI_DIR" "$MODELS_CACHE"
 
+# --- Container ---
 CONTAINER="docker://go2432/spineps-segmentation:latest"
 IMG_PATH="${NXF_SINGULARITY_CACHEDIR}/spineps-segmentation.sif"
 if [[ ! -f "$IMG_PATH" ]]; then
     singularity pull "$IMG_PATH" "$CONTAINER"
 fi
 
-# ============================================================================
-# EXECUTION
-# ============================================================================
-
+# --- Run ---
 singularity exec --nv \
     --bind "$PROJECT_DIR":/work \
     --bind "$DATA_DIR":/data/input \
@@ -72,4 +70,6 @@ singularity exec --nv \
         --valid_ids  /work/models/valid_id.npy \
         --mode "$MODE"
 
-echo "Segmentation Complete."
+echo "================================================================"
+echo "Segmentation complete | End: $(date)"
+echo "================================================================"

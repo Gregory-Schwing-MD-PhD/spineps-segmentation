@@ -38,8 +38,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Path to SPINEPS wrapper (uses python -m spineps.entrypoint, not broken CLI)
-SPINEPS_WRAPPER = '/work/src/preprocessing/spineps_wrapper.sh'
 
 
 # ============================================================================
@@ -175,16 +173,24 @@ def convert_dicom_to_nifti(dicom_dir: Path, output_path: Path, study_id: str) ->
 
 def run_spineps(nifti_path: Path, seg_dir: Path, study_id: str) -> dict:
     """
-    Run SPINEPS via the wrapper (python -m spineps.entrypoint).
-    Collects ALL output types: instance, semantic, sub-region, ctd.json.
+    Run SPINEPS via python -m spineps.entrypoint (the CLI binary is broken).
+    Env vars passed directly to subprocess so they exist at import time —
+    spineps/utils/filepaths.py tries to mkdir its models dir on import,
+    before any wrapper script could set them.
     Returns dict of {output_type: Path} or None on failure.
     """
     try:
         seg_dir.mkdir(parents=True, exist_ok=True)
 
-        # Use the wrapper — direct 'spineps' CLI is broken in the Docker image
+        # Pass env vars via subprocess env so they exist before spineps imports
+        import os
+        env = os.environ.copy()
+        env['SPINEPS_SEGMENTOR_MODELS'] = '/app/models'
+        env['SPINEPS_ENVIRONMENT_DIR'] = '/app/models'
+
+        # Call python -m spineps.entrypoint directly — no wrapper needed
         cmd = [
-            'bash', SPINEPS_WRAPPER, 'sample',
+            'python', '-m', 'spineps.entrypoint', 'sample',
             '-i', str(nifti_path),
             '-model_semantic',  't2w',
             '-model_instance',  'instance',
@@ -196,7 +202,7 @@ def run_spineps(nifti_path: Path, seg_dir: Path, study_id: str) -> dict:
 
         logger.info("  Running SPINEPS...")
         sys.stdout.flush()
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600, env=env)
         sys.stdout.flush()
 
         if result.returncode != 0:
