@@ -45,7 +45,7 @@ fi
 
 # 2. SUBMIT SEGMENTATION (Production Mode)
 echo "[*] Submitting Segmentation Job..."
-JOB_ID_SEG=$(sbatch --parsable $DEPENDENCY --export=MODE=production "$SEG_SCRIPT")
+JOB_ID_SEG=$(sbatch --parsable $DEPENDENCY --export=MODE=prod "$SEG_SCRIPT")
 echo "    -> Segmentation Job: $JOB_ID_SEG"
 
 echo "================================================================"
