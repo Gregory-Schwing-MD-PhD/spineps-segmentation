@@ -141,7 +141,7 @@ def convert_dicom_to_nifti(dicom_dir: Path, output_path: Path, study_id: str) ->
             '-b', 'n',
             str(dicom_dir)
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(cmd, stdout=None, stderr=subprocess.PIPE, text=True, timeout=120)
         sys.stdout.flush()
 
         if result.returncode != 0:
@@ -202,7 +202,8 @@ def run_spineps(nifti_path: Path, seg_dir: Path, study_id: str) -> dict:
 
         logger.info("  Running SPINEPS...")
         sys.stdout.flush()
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600, env=env)
+        # stderr=PIPE captures errors for logging; stdout streams live to SLURM log
+        result = subprocess.run(cmd, stdout=None, stderr=subprocess.PIPE, text=True, timeout=600, env=env)
         sys.stdout.flush()
 
         if result.returncode != 0:
