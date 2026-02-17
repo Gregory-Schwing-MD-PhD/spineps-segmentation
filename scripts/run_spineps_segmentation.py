@@ -3,13 +3,22 @@
 SPINEPS Segmentation Pipeline
 Runs SPINEPS on validation set studies and saves ALL outputs
 
-Outputs per study:
-  - NIfTI: {study_id}_T2w.nii.gz
-  - Instance mask: {study_id}_seg-vert_msk.nii.gz
-  - Semantic mask: {study_id}_seg-spine_msk.nii.gz  
-  - Sub-region mask: {study_id}_seg-subreg_msk.nii.gz
-  - Centroids: {study_id}_ctd.json
-  - Metadata: {study_id}_metadata.json
+Usage:
+    python run_spineps_segmentation.py \
+        --input_dir /work/data/raw/train_images \
+        --series_csv /work/data/raw/train_series_descriptions.csv \
+        --output_dir /work/results/spineps_segmentation \
+        --valid_ids /work/models/valid_id.npy \
+        --mode trial
+
+Output structure under --output_dir:
+    nifti/         {study_id}_T2w.nii.gz
+    segmentations/ {study_id}_seg-vert_msk.nii.gz   (instance)
+                   {study_id}_seg-spine_msk.nii.gz   (semantic)
+                   {study_id}_seg-subreg_msk.nii.gz  (sub-region)
+                   {study_id}_ctd.json               (SPINEPS centroids)
+    metadata/      {study_id}_metadata.json
+    progress.json  (resume state - processed/failed/success counts)
 """
 
 import argparse
@@ -29,9 +38,46 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Path to SPINEPS wrapper (uses python -m spineps.entrypoint, not broken CLI)
+SPINEPS_WRAPPER = '/work/src/preprocessing/spineps_wrapper.sh'
+
+
+# ============================================================================
+# PROGRESS TRACKING  (enables resume after failed jobs)
+# ============================================================================
+
+def load_progress(progress_file: Path) -> dict:
+    """Load progress from previous run, or start fresh."""
+    if progress_file.exists():
+        try:
+            with open(progress_file, 'r') as f:
+                progress = json.load(f)
+            logger.info(
+                f"Resuming: {len(progress['success'])} done, "
+                f"{len(progress['failed'])} failed previously"
+            )
+            return progress
+        except Exception as e:
+            logger.warning(f"Could not load progress file: {e} — starting fresh")
+    return {'processed': [], 'success': [], 'failed': []}
+
+
+def save_progress(progress_file: Path, progress: dict):
+    """Atomically save progress (tmp → rename so a crash can't corrupt it)."""
+    try:
+        tmp = progress_file.with_suffix('.json.tmp')
+        with open(tmp, 'w') as f:
+            json.dump(progress, f, indent=2)
+        tmp.replace(progress_file)
+    except Exception as e:
+        logger.warning(f"Could not save progress: {e}")
+
+
+# ============================================================================
+# DATA LOADING
+# ============================================================================
 
 def load_valid_ids(valid_ids_path: Path) -> set:
-    """Load validation study IDs from .npy file"""
     try:
         valid_ids = np.load(valid_ids_path)
         valid_ids = set([str(id) for id in valid_ids])
@@ -43,7 +89,6 @@ def load_valid_ids(valid_ids_path: Path) -> set:
 
 
 def load_series_descriptions(csv_path: Path) -> pd.DataFrame:
-    """Load series descriptions CSV"""
     try:
         df = pd.read_csv(csv_path)
         logger.info(f"Loaded {len(df)} series descriptions")
@@ -54,45 +99,41 @@ def load_series_descriptions(csv_path: Path) -> pd.DataFrame:
 
 
 def select_best_series(study_dir: Path, series_df: pd.DataFrame, study_id: str) -> Path:
-    """Select best T2 sagittal series for a study"""
-    # Try to use series descriptions
     if series_df is not None:
-        study_series = series_df[series_df['study_id'] == int(study_id)]
-        if len(study_series) > 0:
-            priorities = [
-                'Sagittal T2',
-                'Sagittal T2/STIR',
-                'SAG T2',
-                'Sagittal T1',
-                'SAG T1'
-            ]
-            for priority in priorities:
-                matching = study_series[
-                    study_series['series_description'].str.contains(
-                        priority, case=False, na=False
-                    )
-                ]
-                if len(matching) > 0:
-                    series_id = str(matching.iloc[0]['series_id'])
-                    series_path = study_dir / series_id
-                    if series_path.exists():
-                        return series_path
-    
-    # Fallback: use first available series
+        try:
+            study_series = series_df[series_df['study_id'] == int(study_id)]
+            if len(study_series) > 0:
+                priorities = ['Sagittal T2', 'Sagittal T2/STIR', 'SAG T2', 'Sagittal T1', 'SAG T1']
+                for priority in priorities:
+                    matching = study_series[
+                        study_series['series_description'].str.contains(priority, case=False, na=False)
+                    ]
+                    if len(matching) > 0:
+                        series_id = str(matching.iloc[0]['series_id'])
+                        series_path = study_dir / series_id
+                        if series_path.exists():
+                            return series_path
+        except Exception:
+            pass
+
     series_dirs = sorted([d for d in study_dir.iterdir() if d.is_dir()])
-    if series_dirs:
-        return series_dirs[0]
-    
-    return None
+    return series_dirs[0] if series_dirs else None
 
 
-def convert_dicom_to_nifti(dicom_dir: Path, output_path: Path) -> Path:
-    """Convert DICOM to NIfTI using dcm2niix"""
+# ============================================================================
+# DICOM → NIFTI
+# ============================================================================
+
+def convert_dicom_to_nifti(dicom_dir: Path, output_path: Path, study_id: str) -> Path:
+    """
+    Convert DICOM series to NIfTI using dcm2niix.
+    study_id is passed explicitly to avoid deriving it from the filename
+    (Path.stem on a .nii.gz returns 'name.nii', not 'name').
+    """
     try:
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        study_id = output_path.stem.replace('_T2w', '')
         bids_base = f"sub-{study_id}_T2w"
-        
+
         cmd = [
             'dcm2niix',
             '-z', 'y',
@@ -102,293 +143,301 @@ def convert_dicom_to_nifti(dicom_dir: Path, output_path: Path) -> Path:
             '-b', 'n',
             str(dicom_dir)
         ]
-        
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        
+        sys.stdout.flush()
+
         if result.returncode != 0:
             logger.error(f"dcm2niix failed: {result.stderr}")
             return None
-        
-        expected_output = output_path.parent / f"{bids_base}.nii.gz"
-        
-        if not expected_output.exists():
-            # Find any generated file
-            nifti_files = sorted(output_path.parent.glob(f"{bids_base}*.nii.gz"))
-            if not nifti_files:
+
+        expected = output_path.parent / f"{bids_base}.nii.gz"
+        if not expected.exists():
+            # dcm2niix sometimes appends extra suffixes; take first match
+            files = sorted(output_path.parent.glob(f"{bids_base}*.nii.gz"))
+            if not files:
                 return None
-            generated_file = nifti_files[0]
-            if generated_file != expected_output:
-                shutil.move(str(generated_file), str(expected_output))
-        
-        return expected_output
-        
+            if files[0] != expected:
+                # Remove any stale file at expected path before renaming
+                if expected.exists():
+                    expected.unlink()
+                shutil.move(str(files[0]), str(expected))
+
+        return expected
+
     except Exception as e:
         logger.error(f"DICOM conversion failed: {e}")
         return None
 
 
-def run_spineps_segmentation(nifti_path: Path, seg_dir: Path, study_id: str) -> dict:
+# ============================================================================
+# SPINEPS
+# ============================================================================
+
+def run_spineps(nifti_path: Path, seg_dir: Path, study_id: str) -> dict:
     """
-    Run SPINEPS segmentation and collect ALL outputs
-    
-    Returns dict with paths to all output files
+    Run SPINEPS via the wrapper (python -m spineps.entrypoint).
+    Collects ALL output types: instance, semantic, sub-region, ctd.json.
+    Returns dict of {output_type: Path} or None on failure.
     """
     try:
         seg_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Run SPINEPS
+
+        # Use the wrapper — direct 'spineps' CLI is broken in the Docker image
         cmd = [
-            'bash', '/work/src/screening/spineps_wrapper.sh', 'sample',
+            'bash', SPINEPS_WRAPPER, 'sample',
             '-i', str(nifti_path),
-            '-model_semantic', 't2w',
-            '-model_instance', 'instance',
-            '-model_labeling', 't2w_labeling',
+            '-model_semantic',  't2w',
+            '-model_instance',  'instance',
+            '-model_labeling',  't2w_labeling',
             '-override_semantic',
             '-override_instance',
             '-override_ctd'
         ]
-        
-        logger.debug(f"  Running SPINEPS for {study_id}...")
+
+        logger.info("  Running SPINEPS...")
+        sys.stdout.flush()
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-        
+        sys.stdout.flush()
+
         if result.returncode != 0:
-            logger.error(f"  SPINEPS failed: {result.stderr}")
+            logger.error(f"  SPINEPS failed:\n{result.stderr}")
             return None
-        
-        # Collect outputs from derivatives directory
-        input_parent = nifti_path.parent
-        derivatives_base = input_parent / "derivatives_seg"
-        
+
+        # SPINEPS writes to derivatives_seg/ next to the input NIfTI
+        derivatives_base = nifti_path.parent / "derivatives_seg"
         if not derivatives_base.exists():
-            logger.error(f"  Derivatives directory not found: {derivatives_base}")
+            logger.error(f"  derivatives_seg not found at: {derivatives_base}")
             return None
-        
-        # Expected SPINEPS output files
+
+        def find_file(exact_name: str, glob_pattern: str) -> Path:
+            """Try exact name first, fall back to glob."""
+            f = derivatives_base / exact_name
+            if not f.exists():
+                matches = list(derivatives_base.glob(glob_pattern))
+                f = matches[0] if matches else None
+            return f if (f and f.exists()) else None
+
         outputs = {}
-        
-        # Instance segmentation (vertebrae labels)
-        instance_pattern = f"sub-{study_id}_mod-T2w_seg-vert_msk.nii.gz"
-        instance_file = derivatives_base / instance_pattern
-        if not instance_file.exists():
-            # Try to find any instance file
-            instance_files = list(derivatives_base.glob("*_seg-vert_msk.nii.gz"))
-            if instance_files:
-                instance_file = instance_files[0]
-        
-        if instance_file.exists():
-            output_instance = seg_dir / f"{study_id}_seg-vert_msk.nii.gz"
-            shutil.copy(instance_file, output_instance)
-            outputs['instance_mask'] = output_instance
-            logger.debug(f"  ✓ Instance mask: {output_instance.name}")
-        
-        # Semantic segmentation (spine regions)
-        semantic_pattern = f"sub-{study_id}_mod-T2w_seg-spine_msk.nii.gz"
-        semantic_file = derivatives_base / semantic_pattern
-        if not semantic_file.exists():
-            semantic_files = list(derivatives_base.glob("*_seg-spine_msk.nii.gz"))
-            if semantic_files:
-                semantic_file = semantic_files[0]
-        
-        if semantic_file.exists():
-            output_semantic = seg_dir / f"{study_id}_seg-spine_msk.nii.gz"
-            shutil.copy(semantic_file, output_semantic)
-            outputs['semantic_mask'] = output_semantic
-            logger.debug(f"  ✓ Semantic mask: {output_semantic.name}")
-        
-        # Sub-region segmentation
-        subreg_pattern = f"sub-{study_id}_mod-T2w_seg-subreg_msk.nii.gz"
-        subreg_file = derivatives_base / subreg_pattern
-        if not subreg_file.exists():
-            subreg_files = list(derivatives_base.glob("*_seg-subreg_msk.nii.gz"))
-            if subreg_files:
-                subreg_file = subreg_files[0]
-        
-        if subreg_file.exists():
-            output_subreg = seg_dir / f"{study_id}_seg-subreg_msk.nii.gz"
-            shutil.copy(subreg_file, output_subreg)
-            outputs['subreg_mask'] = output_subreg
-            logger.debug(f"  ✓ Sub-region mask: {output_subreg.name}")
-        
+
+        # Instance segmentation — vertebra-level labels (L1=20 … L6=25, Sacrum=26)
+        f = find_file(f"sub-{study_id}_mod-T2w_seg-vert_msk.nii.gz", "*_seg-vert_msk.nii.gz")
+        if f:
+            dest = seg_dir / f"{study_id}_seg-vert_msk.nii.gz"
+            shutil.copy(f, dest)
+            outputs['instance_mask'] = dest
+            logger.info("  ✓ Instance mask (seg-vert)")
+        else:
+            logger.warning("  ⚠ Instance mask not found — SPINEPS may have failed silently")
+
+        # Semantic segmentation — broad region labels
+        f = find_file(f"sub-{study_id}_mod-T2w_seg-spine_msk.nii.gz", "*_seg-spine_msk.nii.gz")
+        if f:
+            dest = seg_dir / f"{study_id}_seg-spine_msk.nii.gz"
+            shutil.copy(f, dest)
+            outputs['semantic_mask'] = dest
+            logger.info("  ✓ Semantic mask (seg-spine)")
+
+        # Sub-region segmentation — endplates, bodies, spinous processes, etc.
+        f = find_file(f"sub-{study_id}_mod-T2w_seg-subreg_msk.nii.gz", "*_seg-subreg_msk.nii.gz")
+        if f:
+            dest = seg_dir / f"{study_id}_seg-subreg_msk.nii.gz"
+            shutil.copy(f, dest)
+            outputs['subreg_mask'] = dest
+            logger.info("  ✓ Sub-region mask (seg-subreg)")
+
         # Centroids JSON (SPINEPS native format)
-        ctd_pattern = f"sub-{study_id}_mod-T2w_ctd.json"
-        ctd_file = derivatives_base / ctd_pattern
-        if not ctd_file.exists():
-            ctd_files = list(derivatives_base.glob("*_ctd.json"))
-            if ctd_files:
-                ctd_file = ctd_files[0]
-        
-        if ctd_file.exists():
-            output_ctd = seg_dir / f"{study_id}_ctd.json"
-            shutil.copy(ctd_file, output_ctd)
-            outputs['centroid_json'] = output_ctd
-            logger.debug(f"  ✓ Centroids: {output_ctd.name}")
-        
-        if not outputs:
-            logger.error(f"  No SPINEPS outputs found in {derivatives_base}")
+        f = find_file(f"sub-{study_id}_mod-T2w_ctd.json", "*_ctd.json")
+        if f:
+            dest = seg_dir / f"{study_id}_ctd.json"
+            shutil.copy(f, dest)
+            outputs['centroid_json'] = dest
+            logger.info("  ✓ Centroids JSON (ctd)")
+
+        # Must have at least the instance mask to be useful downstream
+        if 'instance_mask' not in outputs:
+            logger.error("  Instance mask missing — treating as failure")
             return None
-        
+
         return outputs
-        
+
+    except subprocess.TimeoutExpired:
+        logger.error("  SPINEPS timed out (>600s)")
+        sys.stdout.flush()
+        return None
     except Exception as e:
-        logger.error(f"  SPINEPS segmentation failed: {e}")
+        logger.error(f"  SPINEPS error: {e}")
         import traceback
         logger.debug(traceback.format_exc())
+        sys.stdout.flush()
         return None
 
 
+# ============================================================================
+# METADATA
+# ============================================================================
+
 def save_metadata(study_id: str, outputs: dict, metadata_dir: Path):
-    """Save processing metadata for a study"""
     metadata = {
-        'study_id': study_id,
-        'outputs': {k: str(v) for k, v in outputs.items()},
+        'study_id':  study_id,
+        'outputs':   {k: str(v) for k, v in outputs.items()},
         'timestamp': pd.Timestamp.now().isoformat()
     }
-    
-    metadata_path = metadata_dir / f"{study_id}_metadata.json"
-    with open(metadata_path, 'w') as f:
+    with open(metadata_dir / f"{study_id}_metadata.json", 'w') as f:
         json.dump(metadata, f, indent=2)
 
 
+# ============================================================================
+# MAIN
+# ============================================================================
+
 def main():
-    parser = argparse.ArgumentParser(
-        description='SPINEPS Segmentation Pipeline'
-    )
-    
-    parser.add_argument('--input_dir', type=str, required=True,
-                       help='DICOM input directory')
-    parser.add_argument('--series_csv', type=str, required=True,
-                       help='Series descriptions CSV')
-    parser.add_argument('--nifti_dir', type=str, required=True,
-                       help='Output directory for NIfTI files')
-    parser.add_argument('--seg_dir', type=str, required=True,
-                       help='Output directory for segmentations')
-    parser.add_argument('--metadata_dir', type=str, required=True,
-                       help='Output directory for metadata')
-    parser.add_argument('--valid_ids', type=str, required=True,
-                       help='Path to valid_id.npy (validation set only)')
-    parser.add_argument('--limit', type=int, default=None,
-                       help='Limit number of studies (for trial mode)')
-    parser.add_argument('--mode', type=str, choices=['trial', 'debug', 'prod'],
-                       default='prod',
-                       help='Execution mode')
-    
+    parser = argparse.ArgumentParser(description='SPINEPS Segmentation Pipeline')
+    parser.add_argument('--input_dir',  required=True, help='DICOM input directory (train_images/)')
+    parser.add_argument('--series_csv', required=True, help='train_series_descriptions.csv')
+    parser.add_argument('--output_dir', required=True,
+                        help='Root output dir. Subdirs nifti/, segmentations/, metadata/ created automatically.')
+    parser.add_argument('--valid_ids',  required=True, help='Path to valid_id.npy')
+    parser.add_argument('--limit', type=int, default=None, help='Cap number of studies')
+    parser.add_argument('--mode', choices=['trial', 'debug', 'prod'], default='prod')
     args = parser.parse_args()
-    
-    # Setup paths
-    input_dir = Path(args.input_dir)
-    nifti_dir = Path(args.nifti_dir)
-    seg_dir = Path(args.seg_dir)
-    metadata_dir = Path(args.metadata_dir)
-    
-    nifti_dir.mkdir(parents=True, exist_ok=True)
-    seg_dir.mkdir(parents=True, exist_ok=True)
-    metadata_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Load validation IDs
-    valid_ids_path = Path(args.valid_ids)
-    valid_ids = load_valid_ids(valid_ids_path)
-    
+
+    # All subdirectories derived from --output_dir
+    output_dir   = Path(args.output_dir)
+    nifti_dir    = output_dir / 'nifti'
+    seg_dir      = output_dir / 'segmentations'
+    metadata_dir = output_dir / 'metadata'
+    progress_file = output_dir / 'progress.json'
+
+    for d in [nifti_dir, seg_dir, metadata_dir]:
+        d.mkdir(parents=True, exist_ok=True)
+
+    # Load progress for resume support
+    progress = load_progress(progress_file)
+    already_processed = set(progress['processed'])
+
+    # Load inputs
+    valid_ids = load_valid_ids(Path(args.valid_ids))
     if not valid_ids:
-        logger.error("No validation IDs loaded - aborting")
+        logger.error("No validation IDs loaded — aborting")
         return 1
-    
-    # Load series descriptions
-    series_csv = Path(args.series_csv)
-    series_df = load_series_descriptions(series_csv)
-    
-    # Get all study directories
+
+    series_df = load_series_descriptions(Path(args.series_csv))
+
+    # Filter to validation set only, then apply mode/limit
+    input_dir  = Path(args.input_dir)
     study_dirs = sorted([d for d in input_dir.iterdir() if d.is_dir()])
-    
-    # Filter to validation set ONLY
     study_dirs = [d for d in study_dirs if d.name in valid_ids]
     logger.info(f"Filtered to {len(study_dirs)} validation studies")
-    
-    # Apply limit if specified
-    if args.limit:
+
+    if args.mode == 'debug':
+        study_dirs = study_dirs[:1]
+    elif args.mode == 'trial':
+        study_dirs = study_dirs[:3]
+    elif args.limit:
         study_dirs = study_dirs[:args.limit]
-        logger.info(f"Limited to {len(study_dirs)} studies ({args.mode} mode)")
-    
-    logger.info("="*70)
+
+    # Exclude already-processed studies (resume support)
+    remaining = [d for d in study_dirs if d.name not in already_processed]
+    skipped   = len(study_dirs) - len(remaining)
+
+    logger.info("=" * 70)
     logger.info("SPINEPS SEGMENTATION PIPELINE")
-    logger.info("="*70)
-    logger.info(f"Mode: {args.mode}")
-    logger.info(f"Studies to process: {len(study_dirs)}")
-    logger.info(f"Validation set only: YES")
-    logger.info("="*70)
-    
-    # Process each study
-    success_count = 0
-    error_count = 0
-    
-    for study_dir in tqdm(study_dirs, desc="Processing studies"):
+    logger.info("=" * 70)
+    logger.info(f"Mode:             {args.mode}")
+    logger.info(f"Total studies:    {len(study_dirs)}")
+    logger.info(f"Already done:     {skipped}")
+    logger.info(f"To process:       {len(remaining)}")
+    logger.info(f"Output root:      {output_dir}")
+    logger.info("=" * 70)
+    sys.stdout.flush()
+
+    success_count = len(progress['success'])
+    error_count   = len(progress['failed'])
+
+    for study_dir in tqdm(remaining, desc="Studies"):
         study_id = study_dir.name
         logger.info(f"\n[{study_id}]")
-        
+        sys.stdout.flush()
+
         try:
-            # Check if already processed
-            expected_instance = seg_dir / f"{study_id}_seg-vert_msk.nii.gz"
-            if expected_instance.exists():
-                logger.info(f"  ✓ Already processed (skipping)")
-                success_count += 1
-                continue
-            
-            # Select best series
+            # Series selection
             series_dir = select_best_series(study_dir, series_df, study_id)
             if series_dir is None:
-                logger.warning(f"  ✗ No suitable series found")
+                logger.warning("  ✗ No suitable series found")
+                progress['processed'].append(study_id)
+                progress['failed'].append(study_id)
+                save_progress(progress_file, progress)
                 error_count += 1
                 continue
-            
             logger.info(f"  Series: {series_dir.name}")
-            
-            # Convert DICOM to NIfTI
+            sys.stdout.flush()
+
+            # DICOM → NIfTI
+            # Pass study_id explicitly — do NOT derive from filename stem
+            # (Path.stem on .nii.gz returns 'name.nii', not 'name')
             nifti_path = nifti_dir / f"{study_id}_T2w.nii.gz"
             if not nifti_path.exists():
-                logger.info(f"  Converting DICOM → NIfTI...")
-                nifti_path = convert_dicom_to_nifti(series_dir, nifti_path)
+                logger.info("  Converting DICOM → NIfTI...")
+                sys.stdout.flush()
+                nifti_path = convert_dicom_to_nifti(series_dir, nifti_path, study_id)
                 if nifti_path is None:
-                    logger.warning(f"  ✗ DICOM conversion failed")
+                    logger.warning("  ✗ DICOM conversion failed")
+                    progress['processed'].append(study_id)
+                    progress['failed'].append(study_id)
+                    save_progress(progress_file, progress)
                     error_count += 1
                     continue
-            
-            # Run SPINEPS segmentation
-            logger.info(f"  Running SPINEPS segmentation...")
-            outputs = run_spineps_segmentation(nifti_path, seg_dir, study_id)
-            
+
+            # SPINEPS segmentation
+            outputs = run_spineps(nifti_path, seg_dir, study_id)
             if outputs is None:
-                logger.warning(f"  ✗ SPINEPS segmentation failed")
+                logger.warning("  ✗ SPINEPS failed")
+                progress['processed'].append(study_id)
+                progress['failed'].append(study_id)
+                save_progress(progress_file, progress)
                 error_count += 1
                 continue
-            
-            # Save metadata
+
+            # Save metadata and mark success
             save_metadata(study_id, outputs, metadata_dir)
-            
-            logger.info(f"  ✓ Complete ({len(outputs)} outputs)")
+            progress['processed'].append(study_id)
+            progress['success'].append(study_id)
+            save_progress(progress_file, progress)
             success_count += 1
-            
+            logger.info(f"  ✓ Done ({len(outputs)} outputs)")
+            sys.stdout.flush()
+
         except KeyboardInterrupt:
-            logger.warning("\n⚠ Interrupted by user")
+            logger.warning("\n⚠ Interrupted — progress saved, safe to resubmit")
+            sys.stdout.flush()
             break
         except Exception as e:
-            logger.error(f"  ✗ Error: {e}")
+            logger.error(f"  ✗ Unexpected error: {e}")
             import traceback
             logger.debug(traceback.format_exc())
+            progress['processed'].append(study_id)
+            progress['failed'].append(study_id)
+            save_progress(progress_file, progress)
             error_count += 1
-    
-    # Summary
-    logger.info("\n" + "="*70)
-    logger.info("PIPELINE COMPLETE")
-    logger.info("="*70)
-    logger.info(f"Successfully processed: {success_count}")
-    logger.info(f"Errors: {error_count}")
-    logger.info(f"Total: {success_count + error_count}")
+            sys.stdout.flush()
+
+    logger.info("\n" + "=" * 70)
+    logger.info("DONE")
+    logger.info("=" * 70)
+    logger.info(f"Success:  {success_count}")
+    logger.info(f"Failed:   {error_count}")
+    logger.info(f"Total:    {success_count + error_count}")
+    if progress['failed']:
+        logger.info(f"Failed study IDs: {progress['failed']}")
+    logger.info(f"Progress saved: {progress_file}")
     logger.info("")
-    logger.info("Next step: Extract centroids")
-    logger.info(f"  python scripts/extract_centroids_spineps.py \\")
+    logger.info("Next step:")
+    logger.info(f"  python scripts/extract_centroids.py \\")
     logger.info(f"    --seg_dir {seg_dir} \\")
-    logger.info(f"    --output_dir results/spineps_segmentation/centroids \\")
+    logger.info(f"    --output_dir {output_dir}/centroids \\")
     logger.info(f"    --mode {args.mode}")
-    
+    sys.stdout.flush()
+
     return 0 if error_count == 0 else 1
 
 

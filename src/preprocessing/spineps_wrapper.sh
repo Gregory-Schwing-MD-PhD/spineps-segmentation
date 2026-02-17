@@ -1,10 +1,14 @@
 #!/bin/bash
-# SPINEPS wrapper script
-# Calls spineps CLI with proper arguments
-
+#
+# SPINEPS WRAPPER
+# Calls SPINEPS via Python module - the CLI binary is broken in the Docker image
+#
 set -e
 
-# Pass all arguments to spineps
-spineps "$@"
+export SPINEPS_SEGMENTOR_MODELS=${SPINEPS_SEGMENTOR_MODELS:-/app/models}
+export SPINEPS_ENVIRONMENT_DIR=${SPINEPS_ENVIRONMENT_DIR:-/app/models}
 
-exit $?
+mkdir -p "${SPINEPS_SEGMENTOR_MODELS}"
+
+# CRITICAL: must call python -m spineps.entrypoint, NOT the 'spineps' binary
+exec python -m spineps.entrypoint "$@"
