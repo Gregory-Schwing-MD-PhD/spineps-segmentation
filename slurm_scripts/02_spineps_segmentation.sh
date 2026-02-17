@@ -13,7 +13,6 @@
 
 set -euo pipefail
 
-# Mode is passed via --export=MODE=... or defaults to prod
 MODE=${MODE:-prod}
 
 echo "================================================================"
@@ -40,9 +39,14 @@ DATA_DIR="${PROJECT_DIR}/data/raw/train_images"
 SERIES_CSV="${PROJECT_DIR}/data/raw/train_series_descriptions.csv"
 OUTPUT_DIR="${PROJECT_DIR}/results/spineps_segmentation"
 NIFTI_DIR="${OUTPUT_DIR}/nifti"
-MODELS_CACHE="${PROJECT_DIR}/models/spineps_cache"   # SPINEPS downloads weights here
+MODELS_CACHE="${PROJECT_DIR}/models/spineps_cache"
 
-mkdir -p logs "$OUTPUT_DIR" "$NIFTI_DIR" "$MODELS_CACHE"
+# SPINEPS hardcodes /opt/conda/.../spineps/models in filepaths.py line 12
+# regardless of env vars — it tries to mkdir this path at import time.
+# Binding a writable host directory over it is the only reliable fix.
+SPINEPS_PKG_MODELS="${PROJECT_DIR}/models/spineps_pkg_models"
+
+mkdir -p logs "$OUTPUT_DIR" "$NIFTI_DIR" "$MODELS_CACHE" "$SPINEPS_PKG_MODELS"
 
 # --- Container ---
 CONTAINER="docker://go2432/spineps-segmentation:latest"
@@ -58,6 +62,7 @@ singularity exec --nv \
     --bind "$OUTPUT_DIR":/data/output \
     --bind "$NIFTI_DIR":/data/output/nifti \
     --bind "$MODELS_CACHE":/app/models \
+    --bind "$SPINEPS_PKG_MODELS":/opt/conda/lib/python3.10/site-packages/spineps/models \
     --bind "$(dirname $SERIES_CSV)":/data/raw \
     --env SPINEPS_SEGMENTOR_MODELS=/app/models \
     --env SPINEPS_ENVIRONMENT_DIR=/app/models \
