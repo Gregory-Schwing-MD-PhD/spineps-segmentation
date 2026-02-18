@@ -511,7 +511,9 @@ def main():
     # Get studies
     nifti_files = sorted(nifti_dir.glob('*_T2w.nii.gz'))
     if valid_ids:
-        nifti_files = [f for f in nifti_files if f.stem.replace('_T2w', '') in valid_ids]
+        # Extract study_id from filename: {study_id}_T2w.nii.gz -> {study_id}
+        nifti_files = [f for f in nifti_files 
+                      if f.name.replace('_T2w.nii.gz', '') in valid_ids]
     
     if args.mode == 'trial':
         nifti_files = nifti_files[:10]
@@ -537,7 +539,8 @@ def main():
     audit_cases = []
 
     for nifti_path in tqdm(nifti_files, desc="Studies"):
-        study_id = nifti_path.stem.replace('_T2w', '')
+        # Extract study_id from filename: {study_id}_T2w.nii.gz
+        study_id = nifti_path.name.replace('_T2w.nii.gz', '')
         logger.info(f"\n[{study_id}]")
 
         # Load volume
